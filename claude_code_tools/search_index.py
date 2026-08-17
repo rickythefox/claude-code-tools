@@ -560,6 +560,17 @@ class SessionIndex:
                         custom_title = data.get("customTitle", "")
                         continue
 
+                    # Pi records a title record; only a user-set (non-auto)
+                    # title counts as a custom title, matching Claude/Codex
+                    # semantics where auto titles are not indexed as one.
+                    if agent == "pi" and data.get("type") == "title":
+                        source = data.get("source") or data.get("titleSource")
+                        if source and source != "auto":
+                            title = data.get("title")
+                            if isinstance(title, str) and title.strip():
+                                custom_title = title.strip()
+                        continue
+
                     role: Optional[str] = None
                     text: str = ""
 
@@ -662,6 +673,48 @@ class SessionIndex:
                             if block_type in ("input_text", "output_text"):
                                 text += block.get("text", "") + "\n"
 
+                    elif agent == "pi":
+                        # Pi format: type is "message" with a nested message
+                        # object; roles are user/assistant/toolResult.
+                        if data.get("type") != "message":
+                            continue
+
+                        message = data.get("message", {})
+                        if not isinstance(message, dict):
+                            continue
+
+                        role = message.get("role")
+                        content = message.get("content")
+                        if not isinstance(content, list):
+                            continue
+
+                        # Extract genuine user text to check for meta patterns
+                        pi_text = ""
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                pi_text += block.get("text", "")
+
+                        # Count only genuine user messages
+                        if role == "user" and not _is_meta_user_message({}, pi_text):
+                            user_count += 1
+
+                        for block in content:
+                            if not isinstance(block, dict):
+                                continue
+                            block_type = block.get("type")
+                            if block_type in ("text", "thinking"):
+                                # thinking blocks store text under "thinking"
+                                text += block.get(block_type, "") + "\n"
+                            elif block_type == "toolCall":
+                                tool_name = block.get("name", "")
+                                text += f"[Tool: {tool_name}]\n"
+                                # Index tool argument values for searchability
+                                arguments = block.get("arguments", {})
+                                if isinstance(arguments, dict):
+                                    for value in arguments.values():
+                                        if isinstance(value, str) and value:
+                                            text += f"{value}\n"
+
                     if role and text.strip():
                         messages.append(f"[{role}] {text.strip()}")
 
@@ -684,9 +737,17 @@ class SessionIndex:
             Dict with metadata and content suitable for indexing, or None on failure
         """
         try:
-            # Detect agent from path
+            # Detect agent from path. Pi sessions live under
+            # ~/.omp/agent/sessions or ~/.pi/agent/sessions.
             path_str = str(jsonl_path)
-            agent = "codex" if ".codex" in path_str else "claude"
+            if ".codex" in path_str:
+                agent = "codex"
+            elif "/agent/sessions/" in path_str and (
+                "/.omp/" in path_str or "/.pi/" in path_str
+            ):
+                agent = "pi"
+            else:
+                agent = "claude"
 
             # Use existing helper for metadata extraction
             from claude_code_tools.export_session import extract_session_metadata
@@ -712,9 +773,15 @@ class SessionIndex:
             # Always use filename-derived session_id (the canonical identifier)
             # Internal sessionId field can be stale in forked sessions
             # Extract UUID from filename: last 36 chars of stem (handles both
-            # "uuid.jsonl" and "rollout-timestamp-uuid.jsonl" formats)
+            # "uuid.jsonl" and "rollout-timestamp-uuid.jsonl" formats).
+            # Pi is the exception: sub-agent files are named after the agent
+            # (e.g. "__advisor.jsonl"), so the record ``id`` from metadata is
+            # the only reliable identifier.
             stem = jsonl_path.stem
-            session_id = stem[-36:] if len(stem) >= 36 else stem
+            if agent == "pi":
+                session_id = metadata.get("session_id") or stem
+            else:
+                session_id = stem[-36:] if len(stem) >= 36 else stem
 
             return {
                 "metadata": {
@@ -747,6 +814,7 @@ class SessionIndex:
         incremental: bool = True,
         claude_home: Optional[Path] = None,
         codex_home: Optional[Path] = None,
+        pi_homes: Optional[list[Path]] = None,
         show_progress: bool = False,
     ) -> dict[str, int]:
         """
@@ -760,6 +828,7 @@ class SessionIndex:
             incremental: If True, only index new/modified files
             claude_home: Claude home directory (stored for filtering)
             codex_home: Codex home directory (stored for filtering)
+            pi_homes: Pi home directories (~/.omp, ~/.pi) for source tagging
             show_progress: If True, show tqdm progress bar
 
         Returns:
@@ -767,6 +836,7 @@ class SessionIndex:
         """
         claude_home_str = str(claude_home) if claude_home else ""
         codex_home_str = str(codex_home) if codex_home else str(Path.home() / ".codex")
+        pi_home_strs = [str(h) for h in (pi_homes or [])]
         stats = {
             "indexed": 0, "skipped": 0, "failed": 0,
             "empty": 0, "parse_error": 0, "index_error": 0,
@@ -840,11 +910,12 @@ class SessionIndex:
                 self.state.mark_indexed(jsonl_path, file_stat)
                 continue
 
-            # Skip sessions run from inside claude_home or codex_home directories
+            # Skip sessions run from inside a claude/codex/pi home directory
             cwd = metadata.get("cwd", "") or ""
             if cwd and (
                 (claude_home_str and cwd.startswith(claude_home_str))
                 or (codex_home_str and cwd.startswith(codex_home_str))
+                or any(cwd.startswith(h) for h in pi_home_strs if h)
             ):
                 stats["skipped"] += 1
                 # Deliberately NOT recorded in the index state: this exclusion
@@ -898,11 +969,18 @@ class SessionIndex:
                 doc.add_text("custom_title", metadata.get("customTitle", "") or "")
 
                 # Source home (for filtering by source directory)
-                # Detect from path whether this is a Claude or Codex session
+                # Detect from path whether this is a Claude, Codex or pi session
                 agent = metadata.get("agent", "")
                 if agent == "codex" or ".codex" in file_path_str:
                     # Codex session - store codex home
                     doc.add_text("claude_home", codex_home_str)
+                elif agent == "pi":
+                    # Pi session - store the pi home this file lives under
+                    pi_home = next(
+                        (h for h in pi_home_strs if h and file_path_str.startswith(h)),
+                        pi_home_strs[0] if pi_home_strs else "",
+                    )
+                    doc.add_text("claude_home", pi_home)
                 else:
                     # Claude session - store claude home
                     doc.add_text("claude_home", claude_home_str)
@@ -1332,6 +1410,7 @@ def auto_index(
     index_path: Optional[Path] = None,
     claude_home: Optional[Path] = None,
     codex_home: Optional[Path] = None,
+    pi_homes: Optional[list[Path]] = None,
     verbose: bool = False,
     silent: bool = False,
 ) -> dict[str, Any]:
@@ -1362,6 +1441,9 @@ def auto_index(
         claude_home = Path.home() / ".claude"
     if codex_home is None:
         codex_home = Path.home() / ".codex"
+    # Pi stores sessions under ~/.omp/agent/sessions and ~/.pi/agent/sessions.
+    if pi_homes is None:
+        pi_homes = [Path.home() / ".omp", Path.home() / ".pi"]
 
     # Find all JSONL session files
     jsonl_files: list[Path] = []
@@ -1382,15 +1464,29 @@ def auto_index(
         codex_file_count = len(codex_files)
         jsonl_files.extend(codex_files)
 
+    # Pi sessions: <pi_home>/agent/sessions/<project>/*.jsonl for the main
+    # session, and one level deeper for sub-agents. Glob both depths.
+    pi_file_count = 0
+    for pi_home in pi_homes:
+        pi_sessions = pi_home / "agent" / "sessions"
+        if pi_sessions.exists():
+            pi_files = list(pi_sessions.glob("*/*.jsonl"))
+            pi_files.extend(pi_sessions.glob("*/*/*.jsonl"))
+            pi_file_count += len(pi_files)
+            jsonl_files.extend(pi_files)
+
     if verbose and not silent:
         print(f"Claude home: {claude_home} ({claude_file_count} files)")
         print(f"Codex home:  {codex_home} ({codex_file_count} files)")
+        pi_homes_str = ", ".join(str(h) for h in pi_homes)
+        print(f"Pi homes:    {pi_homes_str} ({pi_file_count} files)")
         print(f"Total: {len(jsonl_files)} session files to check")
 
     if not jsonl_files:
         return {
             "indexed": 0, "skipped": 0, "failed": 0,
             "total_files": 0, "claude_files": 0, "codex_files": 0,
+            "pi_files": 0,
         }
 
     # Create/open index and run incremental indexing
@@ -1401,11 +1497,13 @@ def auto_index(
         incremental=True,
         claude_home=claude_home,
         codex_home=codex_home,
+        pi_homes=pi_homes,
         show_progress=not silent,
     )
     stats["total_files"] = len(jsonl_files)
     stats["claude_files"] = claude_file_count
     stats["codex_files"] = codex_file_count
+    stats["pi_files"] = pi_file_count
 
     # Prune deleted sessions from index
     pruned = index.prune_deleted()

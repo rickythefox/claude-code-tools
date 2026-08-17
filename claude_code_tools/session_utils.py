@@ -587,6 +587,11 @@ def detect_agent_from_path(file_path: Path) -> Optional[str]:
         str(Path.home() / ".codex")
     ):
         return "codex"
+    # Pi stores sessions under ~/.omp/agent/sessions or ~/.pi/agent/sessions.
+    elif "/agent/sessions/" in path_str and (
+        "/.omp/" in path_str or "/.pi/" in path_str
+    ):
+        return "pi"
 
     return None
 
@@ -814,6 +819,27 @@ def is_valid_session(filepath: Path) -> bool:
                             payload.get("timestamp"),
                         )
                     )
+                ):
+                    return True
+
+                # Pi: the ``session`` record identifies a session (like Codex
+                # session_meta) and is sufficient on its own. A ``message``
+                # record with a dict ``message`` carrying a string role also
+                # validates the file.
+                if (
+                    entry_type == "session"
+                    and any(
+                        isinstance(data.get(field), str) and bool(data[field].strip())
+                        for field in ("id", "cwd", "timestamp")
+                    )
+                ):
+                    return True
+                message = data.get("message")
+                if (
+                    entry_type == "message"
+                    and isinstance(message, dict)
+                    and isinstance(message.get("role"), str)
+                    and bool(message["role"].strip())
                 ):
                     return True
 

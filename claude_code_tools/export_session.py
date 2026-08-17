@@ -266,6 +266,37 @@ def _extract_codex_message_text(data: dict) -> Optional[str]:
     return None
 
 
+def _extract_pi_message_text(data: dict) -> Optional[str]:
+    """
+    Extract text content from a pi session message.
+
+    Pi records messages as ``{"type": "message", "message": {"role", "content"}}``
+    where ``content`` is a list of blocks. Text lives in ``type: "text"`` blocks;
+    assistant messages also carry ``thinking`` and ``toolCall`` blocks which are
+    ignored for the preview text.
+
+    Args:
+        data: Parsed JSON line from a pi session
+
+    Returns:
+        Extracted text or None if no text block is present
+    """
+    message = data.get("message")
+    if not isinstance(message, dict):
+        return None
+    content = message.get("content")
+    if not isinstance(content, list):
+        return None
+
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+
+    return None
+
+
 def _is_meta_text(text: str) -> bool:
     """
     Check if a piece of message text is system-injected meta content.
@@ -385,6 +416,14 @@ def extract_first_last_messages(
                                 text = _extract_codex_message_text(
                                     data
                                 )
+                elif agent == "pi":
+                    if data.get("type") == "message":
+                        message = data.get("message")
+                        if isinstance(message, dict):
+                            raw_role = message.get("role")
+                            if raw_role in ("user", "assistant"):
+                                role = raw_role
+                                text = _extract_pi_message_text(data)
 
                 if role and text:
                     msg_dict = {
@@ -479,6 +518,11 @@ def extract_session_metadata(session_file: Path, agent: str) -> dict[str, Any]:
     # every thread as rollout-*.jsonl, so Codex sub-agents are detected from
     # the session_meta record below instead.
     is_sidechain = session_file.name.startswith("agent-")
+    # Pi writes the main session as ``sessions/<project>/<file>.jsonl`` and its
+    # sub-agents one level deeper as ``sessions/<project>/<run>/<name>.jsonl``.
+    # A pi file whose grandparent is not the ``sessions`` root is a sub-agent.
+    if agent == "pi" and session_file.parent.parent.name != "sessions":
+        is_sidechain = True
 
     metadata: dict[str, Any] = {
         "session_id": session_file.stem,
@@ -623,6 +667,20 @@ def extract_session_metadata(session_file: Path, agent: str) -> dict[str, Any]:
                     ):
                         session_start_timestamp = data["timestamp"]
 
+                # Extract session id for pi sessions from the ``session``
+                # record. Pi has no ``sessionId`` field and its sub-agent
+                # filenames are not UUIDs, so the record ``id`` is the only
+                # reliable identifier. cwd is already captured generically.
+                if agent == "pi" and data.get("type") == "session":
+                    if _nonempty_str(data.get("id")):
+                        metadata["session_id"] = data["id"]
+                    if _nonempty_str(data.get("cwd")):
+                        metadata["cwd"] = data["cwd"]
+                    if session_start_timestamp is None and _nonempty_str(
+                        data.get("timestamp")
+                    ):
+                        session_start_timestamp = data["timestamp"]
+
                 # Extract session start timestamp from first entry with timestamp
                 if session_start_timestamp is None and _nonempty_str(
                     data.get("timestamp")
@@ -630,7 +688,13 @@ def extract_session_metadata(session_file: Path, agent: str) -> dict[str, Any]:
                     session_start_timestamp = data["timestamp"]
 
                 # Stop once we have the essential metadata (cwd and branch).
+                # Pi sessions never record a git branch, so stop as soon as the
+                # ``session`` record has supplied cwd and id.
                 if metadata["cwd"] and metadata["branch"]:
+                    break
+                if agent == "pi" and metadata["cwd"] and _nonempty_str(
+                    metadata["session_id"]
+                ) and metadata["session_id"] != session_file.stem:
                     break
 
     except (OSError, IOError, UnicodeError):

@@ -55,6 +55,8 @@ struct Theme {
     codex_bubble_bg: Color,
     claude_source: Color,
     codex_source: Color,
+    pi_bubble_bg: Color,
+    pi_source: Color,
     separator_fg: Color,
     scope_label_fg: Color,
 }
@@ -78,6 +80,8 @@ impl Theme {
             codex_bubble_bg: Color::Rgb(30, 45, 35),
             claude_source: Color::Rgb(255, 150, 50),
             codex_source: Color::Rgb(80, 200, 120),
+            pi_bubble_bg: Color::Rgb(30, 40, 60),
+            pi_source: Color::Rgb(90, 160, 250),
             separator_fg: Color::Rgb(60, 60, 65),
             scope_label_fg: Color::Rgb(140, 140, 140),
         }
@@ -134,18 +138,18 @@ impl Session {
     }
 
     fn agent_icon(&self) -> &str {
-        if self.agent == "claude" {
-            "●"
-        } else {
-            "■"
+        match self.agent.as_str() {
+            "claude" => "●",
+            "pi" => "▲",
+            _ => "■",
         }
     }
 
     fn agent_display(&self) -> &str {
-        if self.agent == "claude" {
-            "Claude"
-        } else {
-            "Codex"
+        match self.agent.as_str() {
+            "claude" => "Claude",
+            "pi" => "Pi",
+            _ => "Codex",
         }
     }
 
@@ -880,19 +884,21 @@ impl App {
                 // Home filter - apply based on session agent type
                 if s.agent == "codex" {
                     // Codex session: filter by codex_home
-                    if let Some(ref codex_home) = self.filter_codex_home {
+                    if let Some(codex_home) = &self.filter_codex_home {
                         if !s.claude_home.is_empty() && s.claude_home != *codex_home {
                             return false;
                         }
                     }
-                } else {
+                } else if s.agent == "claude" {
                     // Claude session: filter by claude_home
-                    if let Some(ref home) = self.filter_claude_home {
+                    if let Some(home) = &self.filter_claude_home {
                         if !s.claude_home.is_empty() && s.claude_home != *home {
                             return false;
                         }
                     }
                 }
+                // Pi sessions carry their own home (~/.omp, ~/.pi) which is not
+                // passed to this binary, so no home filter applies to them.
 
                 // Scope filter: filter_dir overrides scope_global
                 if let Some(ref filter_dir) = self.filter_dir {
@@ -1958,10 +1964,10 @@ fn render_session_list(frame: &mut Frame, app: &mut App, t: &Theme, area: Rect) 
             let is_selected = i == app.selected;
             let row_num = i + 1; // 1-indexed
 
-            let source_color = if s.agent == "claude" {
-                t.claude_source
-            } else {
-                t.codex_source
+            let source_color = match s.agent.as_str() {
+                "claude" => t.claude_source,
+                "pi" => t.pi_source,
+                _ => t.codex_source,
             };
 
             let header_style = if is_selected {
@@ -1973,10 +1979,10 @@ fn render_session_list(frame: &mut Frame, app: &mut App, t: &Theme, area: Rect) 
             let sep_style = Style::default().fg(t.separator_fg);
 
             // Agent icon + abbreviation
-            let (agent_icon, agent_abbrev) = if s.agent == "claude" {
-                ("●", "CLD")
-            } else {
-                ("■", "CDX")
+            let (agent_icon, agent_abbrev) = match s.agent.as_str() {
+                "claude" => ("●", "CLD"),
+                "pi" => ("▲", "PI "),
+                _ => ("■", "CDX"),
             };
 
             // Determine icon style based on live session state
@@ -2139,6 +2145,8 @@ fn render_preview(frame: &mut Frame, app: &mut App, t: &Theme, area: Rect) {
             ("User", t.user_label, t.user_bubble_bg)
         } else if s.agent == "claude" {
             ("Claude", t.claude_source, t.claude_bubble_bg)
+        } else if s.agent == "pi" {
+            ("Pi", t.pi_source, t.pi_bubble_bg)
         } else {
             ("Codex", t.codex_source, t.codex_bubble_bg)
         };
@@ -2204,6 +2212,8 @@ fn render_preview(frame: &mut Frame, app: &mut App, t: &Theme, area: Rect) {
             ("User", t.user_label, t.user_bubble_bg)
         } else if s.agent == "claude" {
             ("Claude", t.claude_source, t.claude_bubble_bg)
+        } else if s.agent == "pi" {
+            ("Pi", t.pi_source, t.pi_bubble_bg)
         } else {
             ("Codex", t.codex_source, t.codex_bubble_bg)
         };
@@ -2420,10 +2430,10 @@ fn render_full_conversation(frame: &mut Frame, app: &mut App, t: &Theme) {
 
     // Header - session info
     if let Some(s) = app.selected_session() {
-        let source_color = if s.agent == "claude" {
-            t.claude_source
-        } else {
-            t.codex_source
+        let source_color = match s.agent.as_str() {
+            "claude" => t.claude_source,
+            "pi" => t.pi_source,
+            _ => t.codex_source,
         };
 
         let header = Line::from(vec![
@@ -2455,6 +2465,8 @@ fn render_full_conversation(frame: &mut Frame, app: &mut App, t: &Theme) {
     let (agent_label, assistant_bg, assistant_fg) = if let Some(s) = app.selected_session() {
         if s.agent == "claude" {
             ("● Claude", t.claude_bubble_bg, t.claude_source)
+        } else if s.agent == "pi" {
+            ("▲ Pi", t.pi_bubble_bg, t.pi_source)
         } else {
             ("■ Codex", t.codex_bubble_bg, t.codex_source)
         }
@@ -3728,6 +3740,9 @@ fn search_tantivy(
         let session_id_field = schema.get_field("session_id").ok()?;
         let modified_field = schema.get_field("modified").ok()?;
         let claude_home_field = schema.get_field("claude_home").ok();
+        // agent field lets pi sessions bypass the claude/codex home filter,
+        // since pi homes (~/.omp, ~/.pi) are not passed to this binary.
+        let agent_field = schema.get_field("agent").ok();
 
         let reader = index
             .reader_builder()
@@ -3773,6 +3788,12 @@ fn search_tantivy(
             }
             if let Some(cx) = filter_codex_home {
                 let term = Term::from_field_text(home_field, cx);
+                home_clauses.push((Occur::Should, Box::new(TermQuery::new(term, IndexRecordOption::Basic))));
+            }
+            // Pi sessions live under homes not passed to this binary; accept
+            // them via agent so the home filter never excludes pi results.
+            if let Some(agent_f) = agent_field {
+                let term = Term::from_field_text(agent_f, "pi");
                 home_clauses.push((Occur::Should, Box::new(TermQuery::new(term, IndexRecordOption::Basic))));
             }
 

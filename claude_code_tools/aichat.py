@@ -2768,7 +2768,7 @@ def index_stats(index, cwd, claude_home, codex_home):
               help='Sessions modified after date (YYYYMMDD, MM/DD/YY)')
 @click.option('--before', metavar='DATE',
               help='Sessions modified before date (YYYYMMDD, MM/DD/YY)')
-@click.option('--agent', type=click.Choice(['claude', 'codex', 'all']),
+@click.option('--agent', type=click.Choice(['claude', 'codex', 'pi', 'all']),
               default='all', help='Filter by agent type')
 @click.option('--json', 'json_output', is_flag=True,
               help='Output as JSONL for AI agents. Fields per line: session_id, '

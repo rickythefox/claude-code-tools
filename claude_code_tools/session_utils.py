@@ -596,6 +596,54 @@ def detect_agent_from_path(file_path: Path) -> Optional[str]:
     return None
 
 
+def resume_pi_session(
+    session_id: str,
+    cwd: str,
+    session_file: Path,
+    shell_mode: bool = False,
+) -> None:
+    """Resume a pi session with ``omp -r`` (~/.omp) or ``pi -r`` (~/.pi).
+
+    The launcher is chosen from the session file's home directory so that
+    ~/.omp sessions resume with ``omp`` and ~/.pi sessions with ``pi``.
+    Mirrors the Claude/Codex resume helpers: chdir to the session's cwd
+    (so the ID prefix resolves against the right project) and replace the
+    current process with the launcher.
+    """
+    import shlex
+
+    # Pick launcher from the session's home directory.
+    binary = "pi" if "/.pi/" in str(session_file) else "omp"
+
+    if shell_mode:
+        # Emit commands for the caller's shell to eval.
+        if cwd and cwd != os.getcwd():
+            print(f"cd {shlex.quote(cwd)}")
+        print(f"{binary} -r {shlex.quote(session_id)}")
+        return
+
+    # Interactive: offer to switch to the session's directory first.
+    if cwd and cwd != os.getcwd():
+        response = input(
+            f"\nSession is in different directory: {cwd}\n"
+            "Change directory and resume? [Y/n]: "
+        ).strip()
+        if response.lower() in ("", "y", "yes"):
+            try:
+                os.chdir(cwd)
+                print(f"Changed to: {cwd}")
+            except OSError as e:
+                print(f"Error changing directory: {e}")
+                return
+
+    # Replace the current process with the pi launcher.
+    try:
+        os.execvp(binary, [binary, "-r", session_id])
+    except OSError as e:
+        print(f"Error launching {binary}: {e}")
+        sys.exit(1)
+
+
 def detect_agent_from_content(
     file_path: Path,
     max_lines: Optional[int] = 25,

@@ -145,6 +145,11 @@ def execute_action(
             resume_session(
                 session_id, project_path, shell_mode=False, claude_home=claude_home
             )
+        elif agent == "pi":
+            from claude_code_tools.session_utils import resume_pi_session
+            resume_pi_session(
+                session_id, project_path, session_file, shell_mode=False
+            )
         else:
             from claude_code_tools.find_codex_session import resume_session
             resume_session(session_id, project_path, shell_mode=False)

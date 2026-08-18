@@ -4600,9 +4600,13 @@ fn main() -> Result<()> {
             eprintln!("Codex home filter: {}", home);
         }
 
-        let claude_count = sessions.iter().filter(|s| s.agent != "codex").count();
+        let claude_count = sessions.iter().filter(|s| s.agent == "claude").count();
         let codex_count = sessions.iter().filter(|s| s.agent == "codex").count();
-        eprintln!("Sessions in index: {} Claude, {} Codex", claude_count, codex_count);
+        let pi_count = sessions.iter().filter(|s| s.agent == "pi").count();
+        eprintln!(
+            "Sessions in index: {} Claude, {} Codex, {} Pi",
+            claude_count, codex_count, pi_count
+        );
     }
 
     // Create app with CLI options pre-configured
